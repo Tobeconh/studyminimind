@@ -105,7 +105,7 @@ def train_epoch(epoch, loader, iters, ref_model, lm_config, start_step=0, wandb=
             
             if wandb: wandb.log({"loss": current_loss, "dpo_loss": current_dpo_loss, "aux_loss": current_aux_loss, "learning_rate": current_lr, "epoch_time": eta_min})
 
-        if (step % args.save_interval == 0 or step == iters) and is_main_process():
+        if (step % args.save_interval == 0) and is_main_process():
             model.eval()
             moe_suffix = '_moe' if lm_config.use_moe else ''
             ckp = f'{args.save_dir}/{args.save_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
@@ -126,6 +126,24 @@ def train_epoch(epoch, loader, iters, ref_model, lm_config, start_step=0, wandb=
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
+
+    need_final_save = (
+        last_step > start_step and (
+            last_step % args.save_interval != 0
+            or last_step % args.accumulation_steps != 0
+        )
+    )
+    if need_final_save and is_main_process():
+        model.eval()
+        moe_suffix = '_moe' if lm_config.use_moe else ''
+        ckp = f'{args.save_dir}/{args.save_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
+        raw_model = model.module if isinstance(model, DistributedDataParallel) else model
+        raw_model = getattr(raw_model, '_orig_mod', raw_model)
+        state_dict = raw_model.state_dict()
+        torch.save({k: v.half().cpu() for k, v in state_dict.items()}, ckp)
+        lm_checkpoint(lm_config, weight=args.save_weight, model=model, optimizer=optimizer, scaler=scaler, epoch=epoch, step=last_step, wandb=wandb, save_dir='../checkpoints')
+        model.train()
+        del state_dict
 
 
 if __name__ == "__main__":

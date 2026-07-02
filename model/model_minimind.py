@@ -133,6 +133,49 @@ class Attention(nn.Module):
         output = self.resid_dropout(self.o_proj(output))
         return output, past_kv
 
+"""
+class Attention_(nn.module):
+    def __int__(self,config:MiniMindConfig):
+        super().__init__()
+        self.num_key_heads =config.num_attention_heads if config.num_key_value_heads is None else config.num_key_value_heads
+        self.num_attention_keys = config.num_attention_heads
+        self.n_rep = self.num_attention_keys//self.num_key_heads
+        self.head_dim =config.head_dim
+        self.q_proj = nn.Linear(config.hidden_size, self.num_attention_keys * self.head_dim ,bias =False)
+        self.k_proj = nn.Linear(config.hidden_size, self.num_key_heads * self.head_dim ,bias =False)
+        self.v_proj = nn.Linear(config.hidden_size, self.num_key_heads * self.head_dim ,bias =False)
+        self.o_proj = nn.Linear(self.num_attention_keys * self.head_dim, config.hidden_size ,bias=False)
+        self.q_norm = RMSNorm(self.head_dim,config.rms_norm_eps)
+        self.k_norm =RMSNorm(self.head_dim,config.rms_norm_eps)
+        self.flash =hasattr(torch.nn.functional,'scaled_dot_product_attention') and config.flash_attn
+        self.is_causal=True
+        self.dropout=config.dropout
+        self.attn_dropout =nn.Dropout(config.dropout)
+        self.resid_dropout =nn.Dropout(config.dropout)
+    def forward(self,x,pos_embeddings,past_key_value =None,use_cache =False,attention_mask=None):
+        batch_size ,seq_len,_ =x.shape
+        xq,xk,xv =self.q_proj(x),self.k_proj(x),self.v_proj(x)
+        xq =xq.view(batch_size,seq_len,self.num_attention_keys,self.head_dim)
+        xk =xk.view(batch_size,seq_len,self.num_key_heads,self.head_dim)
+        xv =xv.view(batch_size,seq_len,self.num_key_heads,self.head_dim)
+        xq,xk =self.q_norm(xq),self.k_norm(xk)
+        cos,sin =pos_embeddings
+        xq,xk =apply_rotary_pos_emb(xq,xk,cos,sin)
+        if past_key_value is not None:
+            xk,xv=torch.cat([past_key_value[0],xk],dim=1),torch.cat([past_key_value[1],xk],dim=1)
+        past_kv = (xk,xv) if use_cache else None
+        xq,xk,xv= xq.transpose(1,2),repeat_kv(xk,self.n_rep).transpose(1,2),repeat_kv(xv,self.n_rep).transpose(1,2)
+        if self.flash and seq_len>1 and (not self.is_causal or past_key_value is None) and (attention_mask is None or torch.all(attention_mask == 1)):
+            output = F.scaled_dot_product_attention(xq, xk, xv, dropout_p=self.dropout if self.training else 0.0, is_causal=self.is_causal)
+        else:
+            score = (xq @ xk.transpose(-2,-1)) / math.sqrt(self.head_dim)
+            if self.is_causal: score[:,:,:-seq_len:] +=torch.full((seq_len,seq_len),float("-inf"),device=score.device).triu(1)
+            if attention_mask is not None:score += (1.0-attention_mask.unsqueeze(1).unsqueeze(2))*-1e9
+            output = self.attn_dropout(F.softmax(score.float(),dim=-1).type_as(xq)) @xv
+        output = output.transpose(1,2).reshape(batch_size,seq_len,-1)
+        output = self.resid_dropout(self.o_proj(output))
+        return output,past_kv
+"""
 class FeedForward(nn.Module):
     def __init__(self, config: MiniMindConfig, intermediate_size: int = None):
         super().__init__()

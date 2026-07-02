@@ -57,7 +57,7 @@ def train_epoch(epoch, loader, iters, lora_params, start_step=0, wandb=None):
             Logger(f'Epoch:[{epoch + 1}/{args.epochs}]({step}/{iters}), loss: {current_loss:.4f}, logits_loss: {current_logits_loss:.4f}, aux_loss: {current_aux_loss:.4f}, lr: {current_lr:.8f}, epoch_time: {eta_min:.1f}min')
             if wandb: wandb.log({"loss": current_loss, "logits_loss": current_logits_loss, "aux_loss": current_aux_loss, "learning_rate": current_lr, "epoch_time": eta_min})
 
-        if (step % args.save_interval == 0 or step == iters) and is_main_process():
+        if (step % args.save_interval == 0) and is_main_process():
             model.eval()
             moe_suffix = '_moe' if lm_config.use_moe else ''
             lora_save_path = f'{args.save_dir}/{args.lora_name}_{lm_config.hidden_size}{moe_suffix}.pth'
@@ -74,6 +74,20 @@ def train_epoch(epoch, loader, iters, lora_params, start_step=0, wandb=None):
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
+
+    need_final_save = (
+        last_step > start_step and (
+            last_step % args.save_interval != 0
+            or last_step % args.accumulation_steps != 0
+        )
+    )
+    if need_final_save and is_main_process():
+        model.eval()
+        moe_suffix = '_moe' if lm_config.use_moe else ''
+        lora_save_path = f'{args.save_dir}/{args.lora_name}_{lm_config.hidden_size}{moe_suffix}.pth'
+        save_lora(model, lora_save_path)
+        lm_checkpoint(lm_config, weight=args.lora_name, model=model, optimizer=optimizer, scaler=scaler, epoch=epoch, step=last_step, wandb=wandb, save_dir='../checkpoints')
+        model.train()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MiniMind LoRA Fine-tuning")

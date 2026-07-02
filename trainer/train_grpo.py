@@ -69,7 +69,9 @@ def calculate_rewards(prompts, responses, reward_model):
 
 
 def grpo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, reward_model, start_step=0, wandb=None, use_sglang=False):
+    last_step = start_step
     for step, batch in enumerate(loader, start=start_step + 1):
+        last_step = step
         prompts = batch['prompt']  # list[str], length B
         prompt_inputs = tokenizer(prompts, return_tensors="pt", padding=True, return_token_type_ids=False,
                                   padding_side="left", add_special_tokens=False).to(args.device)
@@ -177,7 +179,7 @@ def grpo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, reward_mod
                     "learning_rate": current_lr
                 })
 
-        if (step % args.save_interval == 0 or step == iters) and is_main_process():
+        if (step % args.save_interval == 0) and is_main_process():
             model.eval()
             moe_suffix = '_moe' if lm_config.use_moe else ''
             ckp = f'{args.save_dir}/{args.save_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
@@ -190,17 +192,38 @@ def grpo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, reward_mod
             model.train()
             del state_dict
 
-        if step % args.save_interval == 0 or step == iters: rollout_engine.update_policy(model)
+        if step % args.save_interval == 0: rollout_engine.update_policy(model)
 
         del prompt_inputs, outputs, completion_ids, per_token_logps, ref_per_token_logps
         del completions, rewards, grouped_rewards, mean_r, std_r, advantages, completion_mask, completion_pad_mask, prompt_lens, logp_pos
 
-    if step > start_step and step % args.accumulation_steps != 0:
+    if last_step > start_step and last_step % args.accumulation_steps != 0:
         if args.grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
         optimizer.step()
         scheduler.step()
         optimizer.zero_grad()
+
+    need_final_sync = (
+        last_step > start_step and (
+            last_step % args.save_interval != 0
+            or last_step % args.accumulation_steps != 0
+        )
+    )
+    if need_final_sync and is_main_process():
+        model.eval()
+        moe_suffix = '_moe' if lm_config.use_moe else ''
+        ckp = f'{args.save_dir}/{args.save_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
+        raw_model = model.module if isinstance(model, DistributedDataParallel) else model
+        raw_model = getattr(raw_model, '_orig_mod', raw_model)
+        state_dict = raw_model.state_dict()
+        torch.save({k: v.half().cpu() for k, v in state_dict.items()}, ckp)
+        lm_checkpoint(lm_config, weight=args.save_weight, model=model, optimizer=optimizer,
+                     epoch=epoch, step=last_step, wandb=wandb, save_dir='../checkpoints', scheduler=scheduler)
+        model.train()
+        del state_dict
+    if need_final_sync:
+        rollout_engine.update_policy(model)
 
 
 if __name__ == "__main__":
